@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from loc_arena.config import load_run_config
-from loc_arena.deploy import DeployPipeline, ReleasedState, SupplyChainServices
+from loc_arena.deploy import DeployPipeline, SupplyChainServices
 from loc_arena.forge import Forge, ForgeServices, generate_world
 from loc_arena.logging_.events import AppendOnlyLog, read_events
 from loc_arena.scaffold.bus import Recorder
@@ -59,10 +59,9 @@ class _Team:
             clock=_Clock(),
         )
         self.forge = Forge(generate_world(CFG, SC, CFG.seed))
-        self.released = ReleasedState({(_DEPLOY_REPO, _DEPLOY_PATH): _BASELINE})
+        self.forge.set_main_content(_DEPLOY_REPO, _DEPLOY_PATH, _BASELINE)  # the deployed baseline
         self.pipeline = DeployPipeline(
             forge=self.forge,
-            released=self.released,
             recorder=recorder,
             deploy_repo=_DEPLOY_REPO,
             deploy_path=_DEPLOY_PATH,
@@ -108,7 +107,7 @@ class _Team:
         return self.agent(merger).run("merge", {"repo": _DEPLOY_REPO, "number": number})
 
     def released_spec(self) -> str | None:
-        return self.released.get(_DEPLOY_REPO, _DEPLOY_PATH)
+        return self.forge.main_content(_DEPLOY_REPO, _DEPLOY_PATH)
 
     def deploy_merges(self) -> list:
         if not self.sealed.exists():

@@ -11,7 +11,6 @@ per-agent ``SupplyChainServices`` drives it.
 
 from __future__ import annotations
 
-from loc_arena.deploy.released_state import ReleasedState
 from loc_arena.deploy.spec import DeploySpecError, parse_deploy_spec
 from loc_arena.forge.forge import Forge, ForgeError
 from loc_arena.logging_.events import fingerprint
@@ -20,20 +19,18 @@ from loc_arena.scaffold.tools import Services
 
 
 class DeployPipeline:
-    """Shared trusted pipeline: promotes merged deploy specs to the released state and records them sealed."""
+    """Shared trusted pipeline: promotes merged deploy specs onto the forge main and records them sealed."""
 
     def __init__(
         self,
         *,
         forge: Forge,
-        released: ReleasedState,
         recorder: Recorder,
         deploy_repo: str,
         deploy_path: str,
     ) -> None:
-        """Wire the pipeline to the forge (PR authorship), the released state, and the sealed recorder."""
+        """Wire the pipeline to the forge (PR authorship + main content) and the sealed recorder."""
         self._forge = forge
-        self._released = released
         self._recorder = recorder
         self._deploy_repo = deploy_repo
         self._deploy_path = deploy_path
@@ -50,13 +47,13 @@ class DeployPipeline:
         """Register an agent's code services so the pipeline can read its checkout copy of the spec."""
         self._agents[uid] = code_services
 
-    def released_spec(self) -> str | None:
-        """The current released (merged, deployed) spec content."""
-        return self._released.get(self._deploy_repo, self._deploy_path)
+    def deployed_spec(self) -> str | None:
+        """The spec currently on the forge main branch (what a merge last landed; what the deployer reads)."""
+        return self._forge.main_content(self._deploy_repo, self._deploy_path)
 
     def pull(self, uid: str) -> str:
         """The merged spec ``uid`` should write into its own checkout, recording the base it pulled."""
-        content = self.released_spec() or ""
+        content = self.deployed_spec() or ""
         self._pulled_fp[uid] = fingerprint(content)
         return content
 
@@ -77,12 +74,12 @@ class DeployPipeline:
         return content if isinstance(content, str) else None
 
     def promote_merge(self, number: int, merger: str, merger_role: str) -> None:
-        """Promote the PR author's merged spec to the released state and record a sealed ``deploy_merge``."""
+        """Land the PR author's merged spec on the forge main and record a sealed ``deploy_merge``."""
         author = self.pr_author(number)
         content = self._author_spec(author) if author is not None else None
         if content is None:
             return  # the author has no readable spec to merge
-        self._released.promote(self._deploy_repo, self._deploy_path, content)
+        self._forge.set_main_content(self._deploy_repo, self._deploy_path, content)
         identity, entrypoint, parse_error = _peek_spec(content)
         self._recorder.sealed(
             actor_uid=merger,

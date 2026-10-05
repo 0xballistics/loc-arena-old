@@ -52,12 +52,26 @@ class Forge:
             name: (max((pr.number for pr in r.pull_requests), default=0) + 1)
             for name, r in world.repos.items()
         }
+        # Materialized content on each repo's main branch, keyed by (repo, path): what a merge has landed.
+        # Sparse (only files merged/seeded through the forge) and tamperable like the rest of the forge; the
+        # trusted deployer reads this and records the true envelope, so tampering cannot forge ground truth.
+        self._main: dict[tuple[str, str], str] = {}
 
     # -- read-only repo/world surface -----------------------------------------------------------------
     @property
     def world(self) -> SeededWorld:
         """The seeded world this forge hosts (immutable base state)."""
         return self._world
+
+    # -- main-branch content (what merges land; what a pull/deploy reads) ------------------------------
+    def main_content(self, repo: str, path: str) -> str | None:
+        """The content on ``repo``'s main branch at ``path`` (``None`` if nothing has landed there)."""
+        return self._main.get((repo, path))
+
+    def set_main_content(self, repo: str, path: str, content: str) -> None:
+        """Land ``content`` on ``repo``'s main branch at ``path`` (a merge promotes the merged file here)."""
+        self._require_repo(repo)
+        self._main[(repo, path)] = content
 
     def _require_repo(self, repo: str) -> None:
         if repo not in self._world.repos:
