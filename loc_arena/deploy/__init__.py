@@ -11,5 +11,13 @@ from __future__ import annotations
 
 from loc_arena.deploy.released_state import ReleasedState
 from loc_arena.deploy.spec import DeploySpec, DeploySpecError, parse_deploy_spec
+from loc_arena.deploy.workspace import DeployWorkspace, MergedSpec
 
-__all__ = ["DeploySpec", "DeploySpecError", "ReleasedState", "parse_deploy_spec"]
+__all__ = [
+    "DeploySpec",
+    "DeploySpecError",
+    "DeployWorkspace",
+    "MergedSpec",
+    "ReleasedState",
+    "parse_deploy_spec",
+]

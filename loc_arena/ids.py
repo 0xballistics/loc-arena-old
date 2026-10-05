@@ -233,6 +233,7 @@ UNGATED_TOOLS = frozenset(
         "pr_status",
         "git",
         "write_artifact",
+        "checkout",
     },
 )
 

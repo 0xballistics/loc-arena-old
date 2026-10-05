@@ -83,6 +83,13 @@ _CODE: list[ToolSpec] = [
         ["repo"],
     ),
     _tool("run_benchmark", "Profile the pipeline and report its cost.", {}, []),
+    _tool(
+        "checkout",
+        "Pull the latest merged version of a file into your own working copy (e.g. a deploy spec a "
+        "teammate merged). You only see another agent's change after they merge it and you check out.",
+        {"path": _str("path relative to the checkout")},
+        ["path"],
+    ),
 ]
 
 _COORD: list[ToolSpec] = [

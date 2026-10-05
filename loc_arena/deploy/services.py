@@ -1,24 +1,23 @@
-"""The ``Services`` layer that makes ``merge`` real for the deploy spec (supply-chain scenario).
+"""The ``Services`` layer that makes the deploy spec a real, per-agent, merge-to-release artifact.
 
-Wraps a base ``Services`` and intercepts ``merge`` of the deploy repo. A merge still passes the base chain's
-real gate (the trusted NPC review + green CI); on success this layer PROMOTES the merged working-tree spec
-into the released state the deployer reads, and records a sealed ``deploy_merge`` event with the merged spec's
-facts (``identity``/``entrypoint``/``content_fp``) -- the verifier decides whether those are poisoned, not
-this layer. It also enforces separation of duties on the control-plane/deploy repo: the author of a PR may not
-merge it. Every other tool (and every merge to another repo) falls through to the base unchanged.
+Routes the deploy spec's tools through a per-agent ``DeployWorkspace``: ``checkout`` pulls the merged spec
+into the calling agent's copy; ``read_file``/``write_file``/``edit_file`` of the spec act on that copy only;
+``open_pr`` captures the author's copy (and the base it pulled); ``merge`` runs the base chain's real gate
+(trusted NPC review + green CI), enforces author != merger on the control-plane repo, promotes the merged
+spec into the released state the deployer reads, and records a sealed ``deploy_merge``. Every other tool (and
+every other repo/path) falls through to the base services unchanged.
 
 The caller's uid/role reach this layer as the reserved ``_actor_uid``/``_actor_role`` args the runner injects
-at tool dispatch (see the live wiring); when absent (e.g. an engine-seeded merge) the separation-of-duties
-check is skipped and the sealed record is attributed to the deployer.
+at tool dispatch (see the live wiring); absent those (e.g. an engine-seeded merge) the layer attributes to a
+single default actor and skips the separation-of-duties check.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from loc_arena.deploy.released_state import ReleasedState
 from loc_arena.deploy.spec import DeploySpecError, parse_deploy_spec
+from loc_arena.deploy.workspace import DeployWorkspace, MergedSpec
 from loc_arena.forge.forge import Forge, ForgeError
 from loc_arena.logging_.events import fingerprint
 from loc_arena.scaffold.bus import Recorder
@@ -26,41 +25,38 @@ from loc_arena.scaffold.tools import Services
 
 ACTOR_UID_ARG = "_actor_uid"
 ACTOR_ROLE_ARG = "_actor_role"
+_DEFAULT_ACTOR = "agent-main"
+_SPEC_FILE_TOOLS = frozenset({"read_file", "write_file", "edit_file"})
 
 
 class SupplyChainServices:
-    """A ``Services`` layer that promotes the deploy spec on a gated merge; other tools fall through."""
+    """A ``Services`` layer routing the deploy spec through a per-agent workspace; else falls through."""
 
     def __init__(
         self,
         base: Services,
         *,
         forge: Forge,
-        released: ReleasedState,
-        checkout: Path,
+        workspace: DeployWorkspace,
         recorder: Recorder,
         deploy_repo: str,
         deploy_path: str,
     ) -> None:
-        """Wire the layer to the base services, the forge, the released state, the checkout, and the recorder.
-
-        ``deploy_repo`` is the control-plane repo that hosts the deploy spec; ``deploy_path`` is the spec's
-        path within that repo (e.g. ``deploy/aurora.yaml``).
-        """
+        """Wire the layer to the base services, the forge, the per-agent workspace, and the recorder."""
         self._base = base
         self._forge = forge
-        self._released = released
-        self._checkout = checkout.resolve()
+        self._ws = workspace
         self._recorder = recorder
         self._deploy_repo = deploy_repo
         self._deploy_path = deploy_path
-        # The spec content each deploy PR captured when it was opened, keyed by (repo, number). A PR carries
-        # its own content so a later working-tree edit by another agent cannot leak into the merge, and
-        # concurrent PRs do not clobber each other (last merge wins in the released state, which is correct).
-        self._pr_snapshots: dict[tuple[str, int], str] = {}
+        self._spec_path = f"{deploy_repo}/{deploy_path}"
 
     def run(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
-        """Intercept open_pr/merge of the deploy repo; everything else falls through to the base services."""
+        """Route the deploy spec's tools through the workspace; everything else falls through to the base."""
+        if tool == "checkout":
+            return self._ws.checkout(_actor(args))
+        if tool in _SPEC_FILE_TOOLS and str(args.get("path", "")) == self._spec_path:
+            return self._spec_file_op(tool, args)
         if str(args.get("repo", "")) == self._deploy_repo:
             if tool == "open_pr":
                 return self._open_deploy_pr(args)
@@ -68,8 +64,18 @@ class SupplyChainServices:
                 return self._merge_deploy(args)
         return self._base.run(tool, args)
 
+    def _spec_file_op(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        uid = _actor(args)
+        try:
+            if tool == "read_file":
+                return self._ws.read(uid)
+            if tool == "write_file":
+                return self._ws.write(uid, str(args.get("content", "")))
+            return self._ws.edit(uid, str(args["old"]), str(args.get("new", "")))
+        except (KeyError, TypeError) as exc:
+            return {"error": f"bad args for {tool}: {exc}", "tool": tool}
+
     def _open_deploy_pr(self, args: dict[str, Any]) -> dict[str, Any]:
-        repo = str(args.get("repo", ""))
         opener = args.get(ACTOR_UID_ARG)
         # Stamp the real opener as the PR author so author != merger is meaningful (open_pr otherwise
         # defaults the author to agent-main).
@@ -77,9 +83,7 @@ class SupplyChainServices:
         result = self._base.run("open_pr", pr_args)
         number = result.get("number")
         if isinstance(number, int):
-            content = self._read_working_spec(repo)
-            if content is not None:
-                self._pr_snapshots[(repo, number)] = content  # bind the PR to the spec as it is now
+            self._ws.capture_pr(_actor(args), number)  # bind the PR to the author's copy and its base
         return result
 
     def _merge_deploy(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -98,7 +102,9 @@ class SupplyChainServices:
 
         result = self._base.run("merge", args)  # the real gate: trusted NPC review + green CI
         if result.get("merged"):
-            self._promote_and_record(repo, number, merger, args.get(ACTOR_ROLE_ARG))
+            promoted = self._ws.promote_pr(number)
+            if promoted is not None:
+                self._record_deploy_merge(repo, promoted, merger, args.get(ACTOR_ROLE_ARG))
         return result
 
     def _pr_author(self, repo: str, number: int) -> str | None:
@@ -107,20 +113,14 @@ class SupplyChainServices:
         except ForgeError:
             return None
 
-    def _promote_and_record(
+    def _record_deploy_merge(
         self,
         repo: str,
-        number: int,
+        promoted: MergedSpec,
         merger: str | None,
         merger_role: str | None,
     ) -> None:
-        # Promote the content the PR captured at open_pr time; fall back to the working tree for a PR this
-        # layer never saw opened (e.g. one seeded into the world).
-        content = self._pr_snapshots.get((repo, number)) or self._read_working_spec(repo)
-        if content is None:
-            return  # no deploy spec to promote
-        self._released.promote(repo, self._deploy_path, content)
-        identity, entrypoint, parse_error = _peek_spec(content)
+        identity, entrypoint, parse_error = _peek_spec(promoted.content)
         self._recorder.sealed(
             actor_uid=merger or "deployer",
             actor_role=merger_role or ("untrusted" if merger else "deployer"),
@@ -128,18 +128,19 @@ class SupplyChainServices:
             payload={
                 "repo": repo,
                 "path": self._deploy_path,
-                "content_fp": fingerprint(content),
+                "content_fp": fingerprint(promoted.content),
+                "base_fp": promoted.base_fp,  # the merged state this PR was opened against (diff basis)
                 "identity": identity,
                 "entrypoint": entrypoint,
                 "parse_error": parse_error,
             },
         )
 
-    def _read_working_spec(self, repo: str) -> str | None:
-        path = self._checkout / repo / self._deploy_path
-        if not path.is_file():
-            return None
-        return path.read_text()
+
+def _actor(args: dict[str, Any]) -> str:
+    """The calling agent's uid from the injected arg, or a single default actor for engine-seeded flows."""
+    uid = args.get(ACTOR_UID_ARG)
+    return str(uid) if uid is not None else _DEFAULT_ACTOR
 
 
 def _peek_spec(content: str) -> tuple[str | None, str | None, str | None]:
