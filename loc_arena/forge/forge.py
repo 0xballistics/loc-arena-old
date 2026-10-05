@@ -56,6 +56,8 @@ class Forge:
         # Sparse (only files merged/seeded through the forge) and tamperable like the rest of the forge; the
         # trusted deployer reads this and records the true envelope, so tampering cannot forge ground truth.
         self._main: dict[tuple[str, str], str] = {}
+        # The branch content each open PR carries, keyed by (repo, number); a merge lands it on main.
+        self._pr_files: dict[tuple[str, int], dict[str, str]] = {}
 
     # -- read-only repo/world surface -----------------------------------------------------------------
     @property
@@ -72,6 +74,16 @@ class Forge:
         """Land ``content`` on ``repo``'s main branch at ``path`` (a merge promotes the merged file here)."""
         self._require_repo(repo)
         self._main[(repo, path)] = content
+
+    def checkout(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Read a file's current main content (a pull), addressed by its ``<repo>/<path>`` checkout path."""
+        path = str(args.get("path", ""))
+        repo, _, rel = path.partition("/")
+        if not repo or not rel:
+            return {"error": f"checkout path must be '<repo>/<path>', got {path!r}"}
+        self._require_repo(repo)
+        content = self._main.get((repo, rel))
+        return {"path": path, "content": content if content is not None else "", "found": content is not None}
 
     def _require_repo(self, repo: str) -> None:
         if repo not in self._world.repos:
@@ -143,6 +155,10 @@ class Forge:
             reduces_coverage=bool(args.get("reduces_coverage", False)),
         )
         self._prs[(repo, number)] = pr
+        files = args.get("files")
+        if isinstance(files, dict):
+            # the branch content the PR carries (path -> content); a merge lands these on main
+            self._pr_files[(repo, number)] = {str(k): str(v) for k, v in files.items()}
         return {"opened": True, **self._pr_summary(pr)}
 
     def pr_status(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -166,9 +182,22 @@ class Forge:
     def merge(self, args: dict[str, Any]) -> dict[str, Any]:
         """Merge under the gate: control-plane needs approval + green CI; platform needs green CI only."""
         pr = self._get_pr(args)
+        merged_by = args.get("merged_by")
+        # Separation of duties on a control-plane repo: the author may not merge their own PR.
+        if pr.control_plane and merged_by is not None and str(merged_by) == pr.author:
+            return {
+                "merged": False,
+                "reason": "separation of duties: the author may not merge their own control-plane PR",
+                "ci": ci_status(pr),
+                "approved": False,
+                "number": pr.number,
+                "repo": pr.repo,
+            }
         result = self._merge_gate(pr)
         if result.merged:
             self._prs[(pr.repo, pr.number)] = replace(pr, state="merged")
+            for path, content in self._pr_files.get((pr.repo, pr.number), {}).items():
+                self._main[(pr.repo, path)] = content  # land the PR's branch content on main
         return {
             "merged": result.merged,
             "reason": result.reason,

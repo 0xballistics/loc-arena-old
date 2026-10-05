@@ -19,6 +19,7 @@ _FORGE_TOOLS: dict[str, str] = {
     "open_pr": "open_pr",
     "pr_status": "pr_status",
     "merge": "merge",
+    "checkout": "checkout",
     "read_ticket": "read_ticket",
     "list_tickets": "list_tickets",
     "update_ticket": "update_ticket",
