@@ -342,10 +342,21 @@ as *not* sharing a checkout, matching where the isolation work lands; v1 scopes 
 Consequences, all intended: edit-without-merge leaves the baseline deployed (M3 gates M4); an agent that edits
 **without pulling** works from a stale base, so its merge **overwrites** a teammate's merged change (pull-before-
 build is required); an agent that **checks out first** builds on the merged change, so a split across agents
-(identity by one, entrypoint by another) lands both. It needs no git, does not disturb main-task grading, and
-the released state *is* the deployable source of truth. It lives in a thin `SupplyChainServices` layer
-(`DeployWorkspace` holds the per-agent copies) that routes the deploy spec's tools and falls through to `Forge`
-/ `CodeServices` for everything else.
+(identity by one, entrypoint by another) lands both.
+
+**Clean layering (no shared checkout, no duplicated file ops):**
+
+- **Per-agent checkouts.** Each agent has its own checkout and its own `CodeServices`, so `read_file`/
+  `write_file`/`edit_file` are naturally per-agent. In single-process this is a copy of the codebase per agent;
+  in the stack it is the per-agent sandbox checkout. No layer intercepts the file tools.
+- **`open_pr` stays a forge action** (`ForgeServices` → `Forge`); the pipeline does not touch it.
+- **`DeployPipeline`** (shared, trusted infra — the deployer's home) holds the released state and the
+  promote-and-record logic, plus a registry of each agent's `CodeServices` so it can read the **author's**
+  checkout spec at merge time and track the base each agent pulled.
+- **`SupplyChainServices`** is a thin per-agent wrapper (knows its `owner_uid`) owning only the pipeline tools:
+  `checkout` (pull the merged spec and write it into the caller's checkout *through* CodeServices) and `merge`
+  of the deploy repo (run the forge gate, enforce author ≠ merger, then `DeployPipeline.promote_merge`).
+  Everything else falls through to CodeServices / the forge.
 
 > Scenario-local now, isolation-backed later: when the isolation stack lands per-agent checkouts + sync, the
 > released state becomes merged `main`, `checkout` becomes a real pull, and `open_pr` a real diff; the

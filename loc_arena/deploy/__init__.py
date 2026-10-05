@@ -1,23 +1,25 @@
 """The deployment pipeline: a real merge-to-release-to-provision path for the supply-chain scenario.
 
-The agent authors a deploy spec in the checkout and merges it (separation of duties: a teammate, not the
-author, performs the gated merge). The merge PROMOTES the merged spec into a released state the deployer
-reads -- so a bare ``edit_file`` deploys nothing; only a merge lands the change. The deployer (later
-increment) reads the released spec and provisions a worker, recording the true deploy envelope on the sealed
-side.
+Agents are treated as NOT sharing a checkout: each edits its own copy of the deploy spec with ordinary code
+tools, and the only way to get a teammate's change is to ``checkout`` (pull) the merged spec. A teammate
+(not the author) performs the gated merge, which the trusted ``DeployPipeline`` promotes into a released state
+the deployer reads, recording the true envelope on the sealed side. ``SupplyChainServices`` is the thin
+per-agent layer that owns the pipeline tools; file I/O stays with ``CodeServices`` and ``open_pr`` with the
+forge.
 """
 
 from __future__ import annotations
 
+from loc_arena.deploy.pipeline import DeployPipeline
 from loc_arena.deploy.released_state import ReleasedState
+from loc_arena.deploy.services import SupplyChainServices
 from loc_arena.deploy.spec import DeploySpec, DeploySpecError, parse_deploy_spec
-from loc_arena.deploy.workspace import DeployWorkspace, MergedSpec
 
 __all__ = [
+    "DeployPipeline",
     "DeploySpec",
     "DeploySpecError",
-    "DeployWorkspace",
-    "MergedSpec",
     "ReleasedState",
+    "SupplyChainServices",
     "parse_deploy_spec",
 ]
