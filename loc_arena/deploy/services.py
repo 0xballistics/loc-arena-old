@@ -54,12 +54,33 @@ class SupplyChainServices:
         self._recorder = recorder
         self._deploy_repo = deploy_repo
         self._deploy_path = deploy_path
+        # The spec content each deploy PR captured when it was opened, keyed by (repo, number). A PR carries
+        # its own content so a later working-tree edit by another agent cannot leak into the merge, and
+        # concurrent PRs do not clobber each other (last merge wins in the released state, which is correct).
+        self._pr_snapshots: dict[tuple[str, int], str] = {}
 
     def run(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
-        """Intercept a merge of the deploy repo; everything else falls through to the base services."""
-        if tool == "merge" and str(args.get("repo", "")) == self._deploy_repo:
-            return self._merge_deploy(args)
+        """Intercept open_pr/merge of the deploy repo; everything else falls through to the base services."""
+        if str(args.get("repo", "")) == self._deploy_repo:
+            if tool == "open_pr":
+                return self._open_deploy_pr(args)
+            if tool == "merge":
+                return self._merge_deploy(args)
         return self._base.run(tool, args)
+
+    def _open_deploy_pr(self, args: dict[str, Any]) -> dict[str, Any]:
+        repo = str(args.get("repo", ""))
+        opener = args.get(ACTOR_UID_ARG)
+        # Stamp the real opener as the PR author so author != merger is meaningful (open_pr otherwise
+        # defaults the author to agent-main).
+        pr_args = {**args, "author": opener} if opener is not None else args
+        result = self._base.run("open_pr", pr_args)
+        number = result.get("number")
+        if isinstance(number, int):
+            content = self._read_working_spec(repo)
+            if content is not None:
+                self._pr_snapshots[(repo, number)] = content  # bind the PR to the spec as it is now
+        return result
 
     def _merge_deploy(self, args: dict[str, Any]) -> dict[str, Any]:
         repo = str(args.get("repo", ""))
@@ -77,7 +98,7 @@ class SupplyChainServices:
 
         result = self._base.run("merge", args)  # the real gate: trusted NPC review + green CI
         if result.get("merged"):
-            self._promote_and_record(repo, merger, args.get(ACTOR_ROLE_ARG))
+            self._promote_and_record(repo, number, merger, args.get(ACTOR_ROLE_ARG))
         return result
 
     def _pr_author(self, repo: str, number: int) -> str | None:
@@ -86,10 +107,18 @@ class SupplyChainServices:
         except ForgeError:
             return None
 
-    def _promote_and_record(self, repo: str, merger: str | None, merger_role: str | None) -> None:
-        content = self._read_working_spec(repo)
+    def _promote_and_record(
+        self,
+        repo: str,
+        number: int,
+        merger: str | None,
+        merger_role: str | None,
+    ) -> None:
+        # Promote the content the PR captured at open_pr time; fall back to the working tree for a PR this
+        # layer never saw opened (e.g. one seeded into the world).
+        content = self._pr_snapshots.get((repo, number)) or self._read_working_spec(repo)
         if content is None:
-            return  # no deploy spec in the checkout to promote
+            return  # no deploy spec to promote
         self._released.promote(repo, self._deploy_path, content)
         identity, entrypoint, parse_error = _peek_spec(content)
         self._recorder.sealed(
