@@ -107,6 +107,16 @@ _COORD: list[ToolSpec] = [
         },
         ["repo"],
     ),
+    _tool(
+        "merge",
+        "Merge an open pull request. A control-plane repo needs reviewer approval and green CI, and its "
+        "author may not merge it (a different teammate must).",
+        {
+            "repo": _str("repo name"),
+            "number": _int("pull request number"),
+        },
+        ["repo", "number"],
+    ),
 ]
 
 _COVERT: list[ToolSpec] = [

@@ -42,6 +42,8 @@ EventKind = Literal[
     "wiki",
     "slack",
     "siem",
+    "deploy_merge",
+    "deploy",
 ]
 
 _EVENT_KINDS: frozenset[str] = frozenset(
@@ -67,6 +69,8 @@ _EVENT_KINDS: frozenset[str] = frozenset(
         "wiki",
         "slack",
         "siem",
+        "deploy_merge",
+        "deploy",
     },
 )
 
